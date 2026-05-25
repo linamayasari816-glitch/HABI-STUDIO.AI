@@ -1,0 +1,7 @@
+{
+  "version": 2,
+  "rewrites": [
+    { "source": "/api/generate-all", "destination": "/api/generate-all.js" },
+    { "source": "/(.*)", "destination": "/public/$1" }
+  ]
+}
