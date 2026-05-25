@@ -2,71 +2,106 @@
 import axios from 'axios';
 
 export default async function handler(req, res) {
-  // Log awal: ini harus muncul di Vercel Runtime Logs
-  console.log('MASUK FUNGSI /api/generate');
-  console.log('Method:', req.method);
-
+  console.log('➡️ Fungsi dipanggil');
+  
   if (req.method !== 'POST') {
-    console.log('Method bukan POST, keluar.');
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  let body = {};
-  try {
-    body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-  } catch (e) {
-    console.error('Gagal parse body:', e);
-    return res.status(400).json({ error: 'Body tidak valid.' });
-  }
-
-  const { prompt, modelId } = body;
-  console.log('Prompt:', prompt);
-  console.log('Model ID:', modelId);
+  const { prompt, modelId } = req.body;
+  console.log('Prompt:', prompt, 'Model ID:', modelId);
 
   if (!prompt || !modelId) {
-    console.log('Prompt atau modelId kosong.');
     return res.status(400).json({ error: 'Prompt dan Model ID harus diisi.' });
   }
 
-  // Cek API Key
   const API_KEY = process.env.LEONARDO_API_KEY;
   if (!API_KEY) {
-    console.log('API KEY TIDAK DITEMUKAN!');
+    console.error('❌ API Key tidak ditemukan');
     return res.status(500).json({ error: 'Server error: API Key tidak dikonfigurasi.' });
   }
-  console.log('API KEY ditemukan, panjang:', API_KEY.length);
+
+  // ===== DAFTAR MODEL YANG VALID (DENGAN ROUTING) =====
+  // Model V2 Image (pakai endpoint /v2/generations, parameter "model")
+  const V2_IMAGE_MODELS = [
+    'gemini-2.5-flash-image', // Nano Banana
+    'gpt-image-1.5',
+    'ideogram-3.0',
+    'seedream-4.0',
+    'seedream-4.5',
+  ];
+
+  // Model V1 Image standar (pakai endpoint /v1/generations, parameter "modelId")
+  const V1_IMAGE_MODELS = [
+    '6bef9f1b-29cb-40c7-b9df-32b51c1f67d3', // Leonardo Diffusion XL
+    '1e60896f-3c26-4296-8ecc-53e2afecc132', // Leonardo Vision XL
+    '5c232a9e-9061-4777-980b-ddc8e65647c3', // Leonardo Kino XL
+    '2067ae52-33fd-4a82-bb92-c2c55e7d2786', // Leonardo Anime XL
+    'cd2b2a15-9760-4174-a5ff-4d2925057376', // AlbedoBase XL
+    'b5d207b1-4d9f-4ce5-b2b3-3b42e5f5b0d8', // Stable Diffusion 1.5
+    'e316348f-7773-490e-adcd-46757c738eb7', // Stable Diffusion 2.1
+    'd69c8275-1f4e-4a49-9b75-bb67a2c5c4ec', // PhotoReal V2
+  ];
 
   try {
-    // Pakai endpoint standar dulu untuk tes: modelId langsung dikirim
-    console.log('Mengirim request ke Leonardo API V1...');
-    const response = await axios.post(
-      'https://cloud.leonardo.ai/api/rest/v1/generations',
-      {
-        prompt: prompt,
-        modelId: modelId,
-        width: 512,
-        height: 512,
-        num_images: 1,
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        timeout: 15000, // 15 detik timeout
-      }
-    );
+    let response;
+    let generationId;
 
-    console.log('Response status:', response.status);
-    const generationId = response.data?.sdGenerationJob?.generationId || response.data?.generationId;
+    if (V2_IMAGE_MODELS.includes(modelId)) {
+      // Endpoint V2 untuk model seperti Nano Banana
+      console.log('Menggunakan endpoint V2');
+      response = await axios.post(
+        'https://cloud.leonardo.ai/api/rest/v2/generations',
+        {
+          model: modelId,
+          parameters: {
+            prompt: prompt,
+            width: 1024,
+            height: 1024,
+            quantity: 1,
+            prompt_enhance: 'OFF',
+          },
+          public: false,
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          timeout: 15000,
+        }
+      );
+    } else {
+      // Endpoint V1 untuk model standar
+      console.log('Menggunakan endpoint V1');
+      response = await axios.post(
+        'https://cloud.leonardo.ai/api/rest/v1/generations',
+        {
+          prompt: prompt,
+          modelId: modelId,
+          width: 512,
+          height: 512,
+          num_images: 1,
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          timeout: 15000,
+        }
+      );
+    }
+
+    generationId = response.data?.sdGenerationJob?.generationId || response.data?.generationId;
     if (!generationId) {
-      console.error('Tidak ada generationId di response:', response.data);
+      console.error('❌ Tidak ada generationId:', response.data);
       return res.status(500).json({ error: 'Gagal mendapatkan ID generasi.' });
     }
 
     // Polling hasil
     let imageUrl = null;
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < 30; i++) {
       console.log(`Polling ke-${i + 1}...`);
       const pollRes = await axios.get(
         `https://cloud.leonardo.ai/api/rest/v1/generations/${generationId}`,
@@ -78,28 +113,20 @@ export default async function handler(req, res) {
       const gen = pollRes.data?.generations_by_pk?.generated_images?.[0];
       if (gen && gen.status === 'COMPLETE' && gen.url) {
         imageUrl = gen.url;
-        console.log('Gambar berhasil didapat:', imageUrl);
         break;
       } else if (gen && gen.status === 'FAILED') {
-        console.error('Generasi gagal:', gen.failure_reason);
         return res.status(500).json({ error: `Generasi gagal: ${gen.failure_reason || 'tidak diketahui'}` });
       }
       await new Promise(r => setTimeout(r, 2000));
     }
 
     if (!imageUrl) {
-      console.error('Polling timeout.');
       return res.status(500).json({ error: 'Timeout menunggu gambar.' });
     }
 
     return res.status(200).json({ imageUrl });
   } catch (error) {
-    console.error('Error saat request ke Leonardo:');
-    console.error('Message:', error.message);
-    if (error.response) {
-      console.error('Status:', error.response.status);
-      console.error('Data:', JSON.stringify(error.response.data));
-    }
+    console.error('Error:', error.response?.data || error.message);
     const errorMessage = error.response?.data?.error || error.response?.data?.message || error.message;
     return res.status(500).json({ error: errorMessage });
   }
