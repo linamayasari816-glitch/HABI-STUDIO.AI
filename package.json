@@ -1,0 +1,9 @@
+{
+  "name": "suno-omni-rotator-vercel",
+  "version": "1.0.0",
+  "description": "Auto-rotate OmniAPI keys using temporary emails on Vercel Serverless",
+  "main": "api/generate-cover.js",
+  "dependencies": {
+    "axios": "^1.6.0"
+  }
+}
