@@ -2,6 +2,10 @@
 import axios from 'axios';
 
 export default async function handler(req, res) {
+  // Log request untuk debugging
+  console.log('Request method:', req.method);
+  console.log('Request body:', req.body);
+
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
@@ -13,47 +17,84 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Prompt dan Model ID harus diisi.' });
   }
 
-  // Fungsi untuk polling hasil generasi
+  // Fungsi polling yang lebih detail
   const pollForResult = async (generationId, isVideo = false) => {
-    const maxAttempts = 30; // Maksimal 30 kali cek (60 detik)
+    console.log(`Mulai polling untuk generationId: ${generationId}, isVideo: ${isVideo}`);
+    const maxAttempts = 30;
     for (let i = 0; i < maxAttempts; i++) {
       try {
         const result = await axios.get(
           `https://cloud.leonardo.ai/api/rest/v1/generations/${generationId}`,
           { headers: { Authorization: `Bearer ${API_KEY}` } }
         );
+        console.log(`Polling attempt ${i + 1}: status ${result.status}`);
         
         const generations = result.data?.generations_by_pk?.generated_images;
         if (generations && generations.length > 0) {
           const gen = generations[0];
+          console.log('Generation status:', gen.status);
           if (gen.status === 'COMPLETE' && gen.url) {
             return gen.url;
           } else if (gen.status === 'FAILED') {
-            throw new Error('Generasi gagal di server Leonardo.');
+            throw new Error(`Generasi gagal di server Leonardo. Alasan: ${gen.failure_reason || 'tidak diketahui'}`);
           }
         }
       } catch (pollingError) {
-        // Abaikan error polling sementara, lanjutkan mencoba
-        console.warn('Polling attempt failed, retrying...', pollingError.message);
+        console.error('Polling error:', pollingError.response?.data || pollingError.message);
+        if (pollingError.response?.status === 401) {
+          throw new Error('API Key tidak valid atau tidak memiliki akses ke generasi ini.');
+        }
+        // Jika bukan error fatal, lanjutkan polling
       }
       
-      // Tunggu 2 detik sebelum mencoba lagi
       await new Promise(resolve => setTimeout(resolve, 2000));
     }
-    throw new Error('Timeout: Gambar/video tidak kunjung selesai.');
+    throw new Error('Timeout: Gambar/video tidak kunjung selesai setelah 60 detik.');
   };
 
   try {
     let response;
     let generationId;
 
-    // === ROUTING BERDASARKAN MODEL ===
+    // ===== ROUTING BARU BERDASARKAN MODEL (SUDAH DIPERBAIKI) =====
+    
+    // 1. MODEL V2 IMAGE (Semua model yang menggunakan endpoint V2)
+    const v2ImageModels = [
+      'gemini-2.5-flash-image', // Nano Banana
+      'gpt-image-1.5',          // GPT Image-1.5
+      'ideogram-3.0',           // Ideogram 3.0
+      'seedream-4.0',           // Seedream 4.0
+      'seedream-4.5',           // Seedream 4.5
+      'nano-banana-pro',        // Nano Banana Pro
+    ];
+    
+    // 2. MODEL V2 VIDEO (Kling terbaru, Sora 2 - semuanya endpoint V2)
+    const v2VideoModels = [
+      'kling-3.0',              // Kling 3.0
+      'kling-2.5',              // Kling 2.5 Turbo
+      'kling-2.6',              // Kling 2.6
+      'kling-o1',               // Kling O1
+      'kling-o3',               // Kling O3
+      'sora-2',                 // Sora 2
+    ];
+    
+    // 3. MODEL IMAGE-TO-VIDEO (Veo, Kling 2.1, Seedance, Motion - endpoint khusus)
+    const v1VideoModels = [
+      'VEO3_1',                 // Veo 3.1
+      'VEO3_1FAST',             // Veo 3.1 Fast
+      'VEO3',                   // Veo 3.0
+      'KLING2_1',               // Kling 2.1 Pro
+      'seedance-1.0',           // Seedance 1.0
+      'seedance-1.0-pro',       // Seedance 1.0 Pro
+      'seedance-1.0-pro-fast',  // Seedance 1.0 Pro Fast
+      'motion-2.0',             // Motion 2.0
+    ];
 
-    // 1. MODEL V2 IMAGE (Nano Banana, GPT Image, Ideogram, Seedream)
-    const v2ImageModels = ['gemini-2.5-flash-image', 'gpt-image-1.5', 'ideogram-3.0', 'seedream-4.0', 'seedream-4.5', 'nano-banana-pro'];
+    // ROUTING DIMULAI
     if (v2ImageModels.includes(modelId)) {
+      console.log(`✅ ROUTING: Model ${modelId} → Endpoint V2 Image`);
       response = await axios.post(
-        'https://cloud.leonardo.ai/api/rest/v2/generations', // Endpoint V2
+        'https://cloud.leonardo.ai/api/rest/v2/generations',
         {
           model: modelId,
           parameters: {
@@ -72,14 +113,10 @@ export default async function handler(req, res) {
           },
         }
       );
-      generationId = response.data?.sdGenerationJob?.generationId || response.data?.generationId;
-    }
-
-    // 2. MODEL VIDEO V2 (Kling 3.0, Kling 2.5, dll.)
-    const v2VideoModels = ['kling-3.0', 'kling-2.5', 'kling-2.6', 'kling-o1', 'kling-o3', 'sora-2'];
-    else if (v2VideoModels.includes(modelId)) {
+    } else if (v2VideoModels.includes(modelId)) {
+      console.log(`✅ ROUTING: Model ${modelId} → Endpoint V2 Video`);
       response = await axios.post(
-        'https://cloud.leonardo.ai/api/rest/v2/generations', // Endpoint V2
+        'https://cloud.leonardo.ai/api/rest/v2/generations',
         {
           model: modelId,
           public: false,
@@ -99,14 +136,10 @@ export default async function handler(req, res) {
           },
         }
       );
-      generationId = response.data?.sdGenerationJob?.generationId || response.data?.generationId;
-    }
-
-    // 3. MODEL IMAGE-TO-VIDEO V1 (Veo 3.1, Veo 3.0, Kling 2.1, Seedance, Motion)
-    const v1VideoModels = ['VEO3_1', 'VEO3_1FAST', 'VEO3', 'KLING2_1', 'seedance-1.0', 'seedance-1.0-pro', 'seedance-1.0-pro-fast', 'motion-2.0'];
-    else if (v1VideoModels.includes(modelId)) {
+    } else if (v1VideoModels.includes(modelId)) {
+      console.log(`✅ ROUTING: Model ${modelId} → Endpoint Image-to-Video V1`);
       response = await axios.post(
-        'https://cloud.leonardo.ai/api/rest/v1/generations-image-to-video', // Endpoint Image-to-Video
+        'https://cloud.leonardo.ai/api/rest/v1/generations-image-to-video',
         {
           prompt: prompt,
           model: modelId,
@@ -123,13 +156,11 @@ export default async function handler(req, res) {
           },
         }
       );
-      generationId = response.data?.sdGenerationJob?.generationId || response.data?.generationId;
-    }
-
-    // 4. MODEL STANDARD V1 (Leonardo Diffusion, Stable Diffusion, dll.)
-    else {
+    } else {
+      // 4. MODEL STANDARD V1 (Leonardo Diffusion, Stable Diffusion, dll.)
+      console.log(`✅ ROUTING: Model ${modelId} → Endpoint V1 Standard`);
       response = await axios.post(
-        'https://cloud.leonardo.ai/api/rest/v1/generations', // Endpoint V1 standar
+        'https://cloud.leonardo.ai/api/rest/v1/generations',
         {
           prompt: prompt,
           modelId: modelId,
@@ -144,28 +175,45 @@ export default async function handler(req, res) {
           },
         }
       );
-      generationId = response.data?.sdGenerationJob?.generationId || response.data?.generationId;
     }
 
-    // Jika tidak ada generationId, lempar error
+    console.log('Response status:', response.status);
+    console.log('Response data:', JSON.stringify(response.data).substring(0, 500)); // potong agar tidak terlalu panjang
+
+    generationId = response.data?.sdGenerationJob?.generationId || response.data?.generationId;
     if (!generationId) {
-      console.error('Response tidak mengandung generationId:', response.data);
-      throw new Error('Server Leonardo tidak mengembalikan ID generasi.');
+      console.error('Tidak ada generationId di response:', response.data);
+      throw new Error('Server Leonardo tidak mengembalikan ID generasi. Response: ' + JSON.stringify(response.data));
     }
 
-    // Polling untuk mendapatkan hasil
     const isVideo = [...v2VideoModels, ...v1VideoModels].includes(modelId);
     const imageUrl = await pollForResult(generationId, isVideo);
 
     return res.status(200).json({ imageUrl });
 
   } catch (error) {
-    console.error('Leonardo API Error:', error.response?.data || error.message);
-    
-    // Cek apakah error dari server Leonardo
-    const serverError = error.response?.data?.error || error.response?.data?.message;
+    // Log error selengkap mungkin
+    console.error('FULL ERROR:', {
+      message: error.message,
+      responseData: error.response?.data,
+      responseStatus: error.response?.status,
+      responseHeaders: error.response?.headers,
+    });
+
+    // Kirim pesan error yang paling informatif ke frontend
+    const errorMessage = error.response?.data?.error 
+                      || error.response?.data?.message
+                      || error.response?.data?.detail
+                      || error.message
+                      || 'Gagal generate gambar.';
+
     return res.status(500).json({
-      error: serverError || error.message || 'Gagal generate gambar.',
+      error: errorMessage,
+      // Sertakan detail tambahan untuk debugging (opsional, bisa dihapus nanti)
+      debug: {
+        status: error.response?.status,
+        code: error.response?.data?.code,
+      }
     });
   }
 }
